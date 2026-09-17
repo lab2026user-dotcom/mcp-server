@@ -1,3 +1,4 @@
+import os
 import ssl
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
@@ -14,7 +15,11 @@ def http_check(
     timeout: int = 5,
 ) -> dict:
     try:
-        context = None if verify_tls else ssl._create_unverified_context()
+        context = (
+            ssl.create_default_context()
+            if verify_tls
+            else ssl._create_unverified_context()
+        )
 
         request = Request(url, method="GET")
 
@@ -52,6 +57,60 @@ def http_check(
 
 
 @mcp.tool()
+def get_qdrant_status() -> dict:
+    """Check the health of the Qdrant vector database."""
+
+    url = os.getenv(
+        "QDRANT_URL",
+        "https://192.168.5.13:6333",
+    )
+    api_key = os.getenv("QDRANT_API_KEY")
+    ca_cert = os.getenv(
+        "QDRANT_CA_CERT",
+        "/etc/qdrant/tls/LabRootCA.cer",
+    )
+
+    try:
+        context = ssl.create_default_context(
+            cafile=ca_cert
+        )
+
+        request = Request(
+            f"{url.rstrip('/')}/healthz",
+            method="GET",
+        )
+
+        if api_key:
+            request.add_header("api-key", api_key)
+
+        with urlopen(
+            request,
+            timeout=5,
+            context=context,
+        ) as response:
+            body = response.read().decode(
+                "utf-8",
+                errors="replace",
+            ).strip()
+
+        return {
+            "component": "qdrant",
+            "status": "healthy",
+            "http_status": response.status,
+            "endpoint": url,
+            "message": body,
+        }
+
+    except Exception as exc:
+        return {
+            "component": "qdrant",
+            "status": "unhealthy",
+            "endpoint": url,
+            "error": str(exc),
+        }
+
+
+@mcp.tool()
 def get_platform_status() -> dict:
     """Check the health and reachability of Enterprise AI Platform components."""
 
@@ -68,11 +127,10 @@ def get_platform_status() -> dict:
             "ollama",
             "http://10.10.10.11:11434/api/tags",
         ),
-        "qdrant": http_check(
-            "qdrant",
-            "https://192.168.5.13:6333/healthz",
-            verify_tls=False,
-        ),
+        "qdrant": {
+            "status": "delegated",
+            "note": "Use get_qdrant_status for authenticated TLS health check",
+        },
         "litellm": http_check(
             "litellm",
             "http://litellm.lab.local/health",
@@ -84,13 +142,20 @@ def get_platform_status() -> dict:
         "status": (
             "healthy"
             if all(
-                component["status"] in {"healthy", "reachable"}
+                component["status"] in {
+                    "healthy",
+                    "reachable",
+                    "delegated",
+                }
                 for component in components.values()
             )
             else "degraded"
         ),
         "components": components,
-        "note": "LangChain health is validated inside Kubernetes and will be added when this MCP server runs in-cluster.",
+        "note": (
+            "LangChain health is validated inside Kubernetes "
+            "and will be added when this MCP server runs in-cluster."
+        ),
     }
 
 
@@ -100,3 +165,4 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8000,
     )
+
